@@ -39,25 +39,23 @@
 # THE PATCH (surgical, one insertion point)
 # -----------------------------------------
 # We do NOT rewrite the nested ternary (fragile to re-derive in minified code
-# and risks the mac/win paths). Instead we insert a single Linux *override*
-# immediately AFTER the resolver assignment and BEFORE the existsSync() guard.
-# When running on Linux we reassign `s` to the bundled Rust helper, staged at
-#   ${resourcesRoot}/Release/wispr-flow-linux-helper
-# (forward slashes; same Release/ folder the Windows helper used, so _.ZI is
-# reused unchanged). On mac/win the override is a no-op, so the patch cannot
-# regress those platforms.
+# and risks the mac/win paths). Instead we PREPEND a Linux case to it:
+#   const s = "linux"===process.platform
+#     ? (l().info("Running packaged Linux Helper service"),
+#        path.join(process.resourcesPath, "Release", "wispr-flow-linux-helper"))
+#     : f.tD ? <mac> : <win>;
+# On mac/win the new case is false, so the patch cannot regress them.
 #
-# Anchor (unique in the bundle), keyed on the stable string literal -- NOT on
-# the minified symbols, which are derived from nearby developer strings so the
-# patch survives re-minification (see the "Patch" section below):
-#   `${_.ZI}\\Release\\Wispr Flow Helper.exe`);if(!<fs>().existsSync(<var>))
-# We split it at  `...Helper.exe`);  and  if(!<fs>().existsSync(<var>))
-# inserting the Linux override (which reassigns the derived <var>) between them.
+# Since 1.6.937 the ternary lives in its own exported resolver
+# (`const l=()=>f.tD?...`) and the caller does `const s=(0,f.j)();
+# if(!fs().existsSync(s))`, so an anchor on the existsSync guard no longer
+# works. The ternary head is the same in both shapes, and it is keyed on stable
+# strings (the Dev-Mac log line and isHelperProcessRunningManually), not on
+# minified symbols.
 #
-# The override re-derives the resources root locally (process.resourcesPath)
-# rather than trusting the minified `_.ZI` symbol, so the patch is robust even
-# if `_.ZI` is something other than process.resourcesPath. On a packaged build
-# process.resourcesPath is the directory that contains Release/ and app.asar.
+# The Linux case uses process.resourcesPath rather than the minified `_.ZI`
+# resources-root symbol. On a packaged build process.resourcesPath is the
+# directory that contains Release/ and app.asar.
 #
 # stdio / fd-3 / exec-bit notes: see PATCH NOTES at the bottom of this file.
 #===============================================================================
@@ -112,45 +110,31 @@ if len(lg) != 1:
     sys.exit(f"ERROR: could not uniquely derive logger symbol (candidates: {sorted(lg)}).")
 LOG = lg.pop()
 
-# 2) Anchor A: stable win-path literal + the existsSync guard. Capture the
-#    resolver variable; the override is inserted just before this guard.
-anchorA = re.compile(
-    r'Wispr Flow Helper\.exe`\);'
-    r'(?P<guard>if\(!(?P<fs>[\w$]+)\(\)\.existsSync\((?P<var>[\w$]+)\)\))'
+# 2) Anchor: the head of the resolver's isMac ternary, keyed on the Dev-Mac log
+#    line (stable string) and the isHelperProcessRunningManually property.
+#    We PREPEND a Linux case to the ternary rather than inserting a statement
+#    after it, so the anchor holds for both shapes Wispr has shipped:
+#      <=1.6.897  const s=isMac?...:...;if(!fs().existsSync(s))...   (inline)
+#      >=1.6.937  const l=()=>isMac?...:...   (own module; caller does
+#                 `const s=(0,f.j)();if(!fs().existsSync(s))`)
+#    No variable is reassigned, so no const->let flip is needed either.
+head = re.compile(
+    r'(?=[\w$]+\.[\w$]+\?[\w$]+\.[\w$]+\.isHelperProcessRunningManually\?\('
+    + re.escape(LOG) + r'\(\)\.info\("Running Dev Mac Helper service"\))'
 )
-ma = list(anchorA.finditer(data))
-if len(ma) != 1:
-    sys.exit(f"ERROR: expected exactly 1 existsSync resolver anchor, found {len(ma)}.")
-VAR = ma[0].group('var')
+if len(head.findall(data)) != 1:
+    sys.exit(f"ERROR: expected exactly 1 helper-resolver ternary head, found {len(head.findall(data))}.")
 
-# 3) Resolver declaration: const <VAR>=...isHelperProcessRunningManually? -> let.
-#    `s` is const, so the override's reassignment would throw without this flip.
-declRe = re.compile(
-    r'const(\s+)' + re.escape(VAR) +
-    r'(=[\w$]+\.[\w$]+\?[\w$]+\.[\w$]+\.isHelperProcessRunningManually\?)'
+linux_case = (
+    '"linux"===process.platform/*' + marker + '*/?(' + LOG +
+    '().info("Running packaged Linux Helper service"),'
+    'require("path").join(process.resourcesPath,"Release","wispr-flow-linux-helper")):'
 )
-if len(declRe.findall(data)) != 1:
-    sys.exit(f"ERROR: expected exactly 1 'const {VAR}=...isHelperProcessRunningManually' decl.")
-
-# Build the Linux override against the DERIVED logger + resolver variable.
-override = (
-    'if("linux"===process.platform){/*' + marker + '*/'
-    'const _wlp=require("path").join(process.resourcesPath,"Release","wispr-flow-linux-helper");'
-    + LOG + '().info("Running packaged Linux Helper service",'
-    '{customAttributes:{serviceScriptPath:_wlp}});'
-    + VAR + '=_wlp;}'
-)
-
-# Apply with lambda replacements (no regex-DSL backref interpolation on the
-# replacement side): const->let first, then insert the override.
-data = declRe.sub(lambda m: 'let' + m.group(1) + VAR + m.group(2), data, count=1)
-data = anchorA.sub(lambda m: 'Wispr Flow Helper.exe`);' + override + m.group('guard'),
-                   data, count=1)
+data = head.sub(lambda m: linux_case, data, count=1)
 
 with io.open(path, "w", encoding="utf-8", errors="surrogateescape") as f:
     f.write(data)
-print(f"Patched: derived logger={LOG!r}, resolver var={VAR!r}; "
-      f"const->let + Linux override inserted (1 each).")
+print(f"Patched: derived logger={LOG!r}; Linux case prepended to the resolver ternary.")
 PY
 
 # --- Verify the result --------------------------------------------------------
@@ -174,9 +158,8 @@ fi
 echo "OK: Linux helper-path branch inserted into $BUNDLE"
 echo
 echo "Patched resolver now does (conceptually):"
-echo "  const s = isMac ? <mac> : <win>;"
-echo "  if (process.platform === 'linux')"
-echo "    s = path.join(process.resourcesPath, 'Release', 'wispr-flow-linux-helper');"
+echo "  s = linux ? path.join(process.resourcesPath, 'Release', 'wispr-flow-linux-helper')"
+echo "      : isMac ? <mac> : <win>;"
 echo "  if (!fs.existsSync(s)) { ...feature dead... }"
 echo
 echo "Stage the helper at: <resourcesPath>/Release/wispr-flow-linux-helper (exec bit set)."
