@@ -12,8 +12,9 @@ Flow app version is tracked separately by the `+wispr{X.Y.Z}` suffix.
 
 - The 1.6.937 bump did not build: Wispr moved the helper-path ternary into
   its own exported resolver, so `helper-resolver.sh` lost the anchor it
-  took from the adjacent `existsSync` guard and every package would have
-  shipped with text injection dead. The patch now prepends a Linux case
+  took from the adjacent `existsSync` guard and the build failed at
+  verify-patches with the helper markers missing (nothing shipped: the tag
+  build fails closed). The patch now prepends a Linux case
   to the ternary's head, which is the same on 1.6.774 and 1.6.937 and
   needs no const->let flip. Three `installer-pin.bats` cases that
   hardcoded 1.6.897 as the pinned version now read it from the pin, so the

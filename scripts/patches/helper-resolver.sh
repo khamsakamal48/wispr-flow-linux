@@ -16,25 +16,36 @@
 # not exist on Linux -> existsSync() fails -> "Helper service script path not
 # found" -> the entire text-injection feature is dead.
 #
-# EXACT CURRENT CODE (recovered from extract/app/.webpack/main/index.js,
-# byte offset ~3663489; see docs/reference/ipc-contract.md S8). Minified
-# symbols: f.tD = ("darwin"===process.platform) i.e. isMac;
-#          _.ZI = the resources root dir (parent of the Release/ folder);
+# UPSTREAM CODE, two shapes so far (see docs/reference/ipc-contract.md S8).
+# Minified symbols churn per release; the names below are 1.6.897's:
+#          f.tD = ("darwin"===process.platform) i.e. isMac;
+#          S.ZI = the resources root dir (parent of the Release/ folder);
 #          E.ty.isHelperProcessRunningManually = dev-mode flag;
 #          d() = node:fs; l() = logger.
+#
+# Inline, through 1.6.897 (the ternary sits in the spawn function):
 #
 #   const s = f.tD
 #     ? E.ty.isHelperProcessRunningManually
 #         ? (l().info("Running Dev Mac Helper service"),
-#            `${_.ZI}/swift-helper-app/DerivedData/Wispr Flow Helper/Build/Products/Debug/Wispr Flow.app/Contents/MacOS/Wispr Flow`)
+#            `${S.ZI}/swift-helper-app/DerivedData/Wispr Flow Helper/Build/Products/Debug/Wispr Flow.app/Contents/MacOS/Wispr Flow`)
 #         : (l().info("Running packaged Mac Helper service"),
-#            `${_.ZI}/swift-helper-app-dist/Wispr Flow.app/Contents/MacOS/Wispr Flow`)
-#     : E.ty.isHelperProcessRunningManually
+#            `${S.ZI}/swift-helper-app-dist/Wispr Flow.app/Contents/MacOS/Wispr Flow`)
+#     : E.ty.isHelperProcessRunningManually || !a.app.isPackaged
 #         ? (l().info("Running Dev Windows Helper service"),
-#            `${_.ZI}\\windows-helper-app\\Wispr Flow Helper\\Release\\Wispr Flow Helper.exe`)
+#            `${S.ZI}\\windows-helper-app\\Wispr Flow Helper\\Release\\Wispr Flow Helper.exe`)
 #         : (l().info("Running packaged Windows Helper service"),
-#            `${_.ZI}\\Release\\Wispr Flow Helper.exe`);
+#            `${S.ZI}\\Release\\Wispr Flow Helper.exe`);
 #   if(!d().existsSync(s)) return void l().error("Helper service script path not found", ...);
+#
+# Own module, since 1.6.937 (the same ternary is the body of an exported
+# arrow function; the spawn function and the meeting recorder's native
+# capture both call it):
+#
+#   const l = () => o.tD ? a.ty.isHelperProcessRunningManually ? (...) : (...)
+#                        : a.ty.isHelperProcessRunningManually || !r.app.isPackaged ? (...) : (...);
+#   ...
+#   const s = (0, f.j)(); if(!d().existsSync(s)) return void l().error(...);
 #
 # THE PATCH (surgical, one insertion point)
 # -----------------------------------------
@@ -85,27 +96,29 @@ if [[ ! -f "$BUNDLE.orig" ]]; then
   echo "Backup written: $BUNDLE.orig"
 fi
 
-# --- Patch (all minified symbols DERIVED from stable developer strings) -------
-# Minified identifiers (the logger accessor, the fs accessor, the resolver
-# result variable) churn every release, so we do NOT hardcode them. Instead we
-# anchor on developer strings that survive minification and read the live
-# identifiers back out of the match:
-#
-#   * logger accessor   <- the literal  "Running packaged Windows Helper service"
-#   * resolver variable <- the literal  `Wispr Flow Helper.exe`  + existsSync(...)
-#   * resolver decl     <- the property  isHelperProcessRunningManually  (+ var)
-#
-# The override reassigns the DERIVED variable and logs via the DERIVED logger,
-# so a future re-minify that renames s/d/l still patches correctly (or fails
-# loudly with a clear "could not derive" error -- never a silent no-op).
+# --- Patch (the one minified symbol used is DERIVED from a developer string) --
+# The logger accessor churns every release, so it is not hardcoded: it is read
+# out of the "Running packaged Windows Helper service" log line. The insertion
+# point is the ternary head, located by the isHelperProcessRunningManually
+# property and the "Running Dev Mac Helper service" log line. Nothing else in
+# the bundle is referenced, so a re-minify that renames every symbol still
+# patches correctly, or fails loudly on the exactly-one assertion -- never a
+# silent no-op.
 python3 - "$BUNDLE" "$LINUX_MARKER" <<'PY'
 import sys, io, re
 path, marker = sys.argv[1], sys.argv[2]
 with io.open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
     data = f.read()
 
+# Any JS string delimiter. A bundler swap can re-emit every "literal" as a
+# `literal` (docs/learnings/patching-minified-js.md, "Quote style"), so no
+# anchor below spells a quote.
+Q = r'[`"\']'
+
 # 1) Logger accessor, from the packaged-Windows-helper log line (stable string).
-lg = set(re.findall(r'([\w$]+)\(\)\.info\("Running packaged Windows Helper service"', data))
+lg = set(re.findall(
+    r'([\w$]+)\(\)\.info\(' + Q + r'Running packaged Windows Helper service' + Q,
+    data))
 if len(lg) != 1:
     sys.exit(f"ERROR: could not uniquely derive logger symbol (candidates: {sorted(lg)}).")
 LOG = lg.pop()
@@ -120,7 +133,7 @@ LOG = lg.pop()
 #    No variable is reassigned, so no const->let flip is needed either.
 head = re.compile(
     r'(?=[\w$]+\.[\w$]+\?[\w$]+\.[\w$]+\.isHelperProcessRunningManually\?\('
-    + re.escape(LOG) + r'\(\)\.info\("Running Dev Mac Helper service"\))'
+    + re.escape(LOG) + r'\(\)\.info\(' + Q + r'Running Dev Mac Helper service' + Q + r'\))'
 )
 if len(head.findall(data)) != 1:
     sys.exit(f"ERROR: expected exactly 1 helper-resolver ternary head, found {len(head.findall(data))}.")
@@ -192,10 +205,8 @@ echo "Stage the helper at: <resourcesPath>/Release/wispr-flow-linux-helper (exec
 #    to the no-op `stub` injector -> text injection is silently dead. This is
 #    NOT harmless; helper-env.sh prepends `...process.env,` to fix it.
 #
-# 4. PATH ROOT -- the override uses process.resourcesPath (robust) instead of
-#    the minified _.ZI symbol. On a packaged build both resolve to the dir that
-#    contains Release/ and app.asar. If you prefer to mirror _.ZI exactly,
-#    replace the require("path").join(...) expression with
-#    `${_.ZI}/Release/wispr-flow-linux-helper` -- but process.resourcesPath is
+# 4. PATH ROOT -- the Linux case uses process.resourcesPath (robust) instead
+#    of the minified resources-root symbol. On a packaged build both resolve to
+#    the dir that contains Release/ and app.asar, and process.resourcesPath is
 #    safer across forge layouts.
 #===============================================================================
