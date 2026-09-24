@@ -21,18 +21,17 @@
 # THE PATCH
 # ---------
 # Right after `const n=new Tray(t);`, on Linux only:
-#   * load TrayIconMac@2x.png and recolour its ink. The colour is the panel's
-#     own icon colour when the shell publishes one: Ryoku writes its live
-#     wallpaper palette to ~/.cache/ryoku/colors.json and draws bar glyphs in
-#     `onSurface`. Otherwise white (dark theme) or dark grey (light theme)
-#     from nativeTheme.shouldUseDarkColors (the XDG portal color-scheme).
-#     Ryoku's palette can disagree with the portal (a light wallpaper palette
-#     under a dark system theme), which is why the file wins;
+#   * load TrayIconMac@2x.png and recolour its ink. The colour is picked from
+#     the desktop's wallpaper palette when available: Ryoku writes its live
+#     wallpaper-derived Material Color palette to ~/.cache/ryoku/matugen-carrier.json,
+#     reading `onSurface` for the best icon colour. Falls back to nativeTheme
+#     (XDG portal color-scheme) if no palette file exists. The Material palette
+#     is more responsive than polling system settings.
 #   * re-centre it on a 1.375x canvas (32 -> 44px, the ratio that matched the
 #     neighbouring glyphs on a quickshell bar) -- padding only, no resampling;
-#   * n.setImage() it, and again on nativeTheme "updated" and whenever
-#     colors.json is rewritten (fs.watch on its directory, since the file is
-#     replaced rather than edited).
+#   * n.setImage() immediately on startup (with retry after 200ms for startup
+#     races), on nativeTheme "updated", and whenever the palette files are
+#     rewritten (fs.watchFile on the palette files with aggressive polling).
 # The bitmap is premultiplied BGRA, so each channel is colour*alpha/255.
 #
 # Anchor: the createFromPath -> setTemplateImage(!0) -> new Tray sequence,
@@ -78,10 +77,15 @@ inject = (
     '_wfs=require("fs"),_wpa=require("path"),'
     '_wP=(' + m.group('path') + ')'
     '.replace("TrayIconWindows.png","TrayIconMac@2x.png"),'
-    '_wF=_wpa.join(process.env.XDG_CACHE_HOME||'
-    '_wpa.join(require("os").homedir(),".cache"),"ryoku","colors.json"),'
-    '_wC=()=>{try{const h=JSON.parse(_wfs.readFileSync(_wF,"utf8")).onSurface;'
-    'if(/^#[0-9a-f]{6}$/i.test(h))return[1,3,5].map(i=>parseInt(h.substr(i,2),16))}'
+    '_wH=process.env.XDG_CACHE_HOME||_wpa.join(require("os").homedir(),".cache"),'
+    '_wM=_wpa.join(_wH,"ryoku","matugen-carrier.json"),'
+    '_wF=_wpa.join(_wH,"ryoku","colors.json"),'
+    '_wC=()=>{try{const m=JSON.parse(_wfs.readFileSync(_wM,"utf8")).colors;'
+    'if(m&&m.on_surface){const h=typeof m.on_surface==="string"?m.on_surface:m.on_surface.hex;'
+    'if(h&&/^#[0-9a-f]{6}$/i.test(h))return[1,3,5].map(i=>parseInt(h.substr(i,2),16))}'
+    '}'
+    'catch(e){}try{const c=JSON.parse(_wfs.readFileSync(_wF,"utf8")).onSurface;'
+    'if(/^#[0-9a-f]{6}$/i.test(c))return[1,3,5].map(i=>parseInt(c.substr(i,2),16))}'
     'catch(e){}const v=_wT.shouldUseDarkColors?255:48;return[v,v,v]},'
     '_wG=()=>{const b=_wI.createFromPath(_wP).toBitmap({scaleFactor:2}),'
     'w=Math.round(Math.sqrt(b.length/4));if(!w)return null;'
@@ -92,8 +96,11 @@ inject = (
     'return _wI.createFromBitmap(o,{width:C,height:C})},'
     '_wS=()=>{const g=_wG();g&&!' + tray + '.isDestroyed()&&'
     + tray + '.setImage(g)};'
-    '_wS();_wT.on("updated",_wS);'
-    'try{_wfs.watch(_wpa.dirname(_wF),(e,f)=>{"colors.json"===f&&setTimeout(_wS,300)})}'
+    '_wS();setTimeout(_wS,200);_wT.on("updated",_wS);'
+    'try{_wfs.watch(_wpa.dirname(_wM),(e,f)=>{"matugen-carrier.json"===f&&_wS()})}'
+    'catch(e){}try{_wfs.watchFile(_wM,{interval:300},_wS)}'
+    'catch(e){}try{_wfs.watch(_wpa.dirname(_wF),(e,f)=>{"colors.json"===f&&_wS()})}'
+    'catch(e){}try{_wfs.watchFile(_wF,{interval:300},_wS)}'
     'catch(e){}}'
 )
 patched = src[:m.end()] + inject + src[m.end():]
