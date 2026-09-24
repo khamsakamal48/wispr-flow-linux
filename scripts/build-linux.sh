@@ -322,6 +322,11 @@ step3_patch_bundle() {
     auto "Running linux-tray-glyph.sh on $target_bundle"
     bash "$SCRIPT_DIR/patches/linux-tray-glyph.sh" "$target_bundle" \
       || warn "linux-tray-glyph.sh failed -- see its output above."
+    # `--hidden` skips the hub window at launch (autostart into the tray);
+    # the vendor only hides it on mac/win32. See linux-start-hidden.sh.
+    auto "Running linux-start-hidden.sh on $target_bundle"
+    bash "$SCRIPT_DIR/patches/linux-start-hidden.sh" "$target_bundle" \
+      || warn "linux-start-hidden.sh failed -- see its output above."
     # Seed fresh Linux profiles with the WINDOWS default shortcut/PTT map. The
     # main process picks the defaults with a `"win32"===process.platform` flag,
     # so on Linux it wrote the macOS map -- whose PTT key resolves to keycode -1
